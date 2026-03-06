@@ -12,6 +12,7 @@ import (
 	"github.com/coredns/coredns/plugin/pkg/transport"
 
 	"github.com/miekg/dns"
+	"github.com/pires/go-proxyproto"
 )
 
 // ServerTLS represents an instance of a TLS-over-DNS-server.
@@ -39,8 +40,8 @@ func NewServerTLS(addr string, group []*Config) (*ServerTLS, error) {
 	return &ServerTLS{Server: s, tlsConfig: tlsConfig}, nil
 }
 
-// Compile-time check to ensure Server implements the caddy.GracefulServer interface
-var _ caddy.GracefulServer = &Server{}
+// Compile-time check to ensure ServerTLS implements the caddy.GracefulServer interface
+var _ caddy.GracefulServer = &ServerTLS{}
 
 // Serve implements caddy.TCPServer interface.
 func (s *ServerTLS) Serve(l net.Listener) error {
@@ -54,10 +55,10 @@ func (s *ServerTLS) Serve(l net.Listener) error {
 	s.server[tcp] = &dns.Server{Listener: l,
 		Net:           "tcp-tls",
 		MaxTCPQueries: tlsMaxQueries,
-		ReadTimeout:   s.readTimeout,
-		WriteTimeout:  s.writeTimeout,
+		ReadTimeout:   s.ReadTimeout,
+		WriteTimeout:  s.WriteTimeout,
 		IdleTimeout: func() time.Duration {
-			return s.idleTimeout
+			return s.IdleTimeout
 		},
 		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
 			ctx := context.WithValue(context.Background(), Key{}, s.Server)
@@ -78,6 +79,9 @@ func (s *ServerTLS) Listen() (net.Listener, error) {
 	l, err := reuseport.Listen("tcp", s.Addr[len(transport.TLS+"://"):])
 	if err != nil {
 		return nil, err
+	}
+	if s.connPolicy != nil {
+		l = &proxyproto.Listener{Listener: l, ConnPolicy: s.connPolicy}
 	}
 	return l, nil
 }

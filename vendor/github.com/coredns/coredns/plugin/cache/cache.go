@@ -24,12 +24,12 @@ type Cache struct {
 	zonesMetricLabel string
 	viewMetricLabel  string
 
-	ncache  *cache.Cache
+	ncache  *cache.Cache[*item]
 	ncap    int
 	nttl    time.Duration
 	minnttl time.Duration
 
-	pcache  *cache.Cache
+	pcache  *cache.Cache[*item]
 	pcap    int
 	pttl    time.Duration
 	minpttl time.Duration
@@ -61,11 +61,11 @@ func New() *Cache {
 	return &Cache{
 		Zones:      []string{"."},
 		pcap:       defaultCap,
-		pcache:     cache.New(defaultCap),
+		pcache:     cache.New[*item](defaultCap),
 		pttl:       maxTTL,
 		minpttl:    minTTL,
 		ncap:       defaultCap,
-		ncache:     cache.New(defaultCap),
+		ncache:     cache.New[*item](defaultCap),
 		nttl:       maxNTTL,
 		minnttl:    minNTTL,
 		failttl:    minNTTL,
@@ -117,13 +117,7 @@ func hash(qname string, qtype uint16, do, cd bool) uint64 {
 }
 
 func computeTTL(msgTTL, minTTL, maxTTL time.Duration) time.Duration {
-	ttl := msgTTL
-	if ttl < minTTL {
-		ttl = minTTL
-	}
-	if ttl > maxTTL {
-		ttl = maxTTL
-	}
+	ttl := min(max(msgTTL, minTTL), maxTTL)
 	return ttl
 }
 
@@ -182,6 +176,7 @@ func (w *ResponseWriter) RemoteAddr() net.Addr {
 
 // WriteMsg implements the dns.ResponseWriter interface.
 func (w *ResponseWriter) WriteMsg(res *dns.Msg) error {
+	res = res.Copy()
 	mt, _ := response.Typify(res, w.now().UTC())
 
 	// key returns empty string for anything we don't want to cache.
@@ -198,6 +193,18 @@ func (w *ResponseWriter) WriteMsg(res *dns.Msg) error {
 		duration = computeTTL(msgTTL, w.minpttl, w.pttl)
 	}
 
+	// Apply capped TTL to this reply to avoid jarring TTL experience 1799 -> 8 (e.g.)
+	ttl := uint32(duration.Seconds())
+	res.Answer = filterRRSlice(res.Answer, ttl, false)
+	res.Ns = filterRRSlice(res.Ns, ttl, false)
+	res.Extra = filterRRSlice(res.Extra, ttl, false)
+
+	if !w.do && !w.ad {
+		// unset AD bit if requester is not OK with DNSSEC
+		// But retain AD bit if requester set the AD bit in the request, per RFC6840 5.7-5.8
+		res.AuthenticatedData = false
+	}
+
 	if hasKey && duration > 0 {
 		if w.state.Match(res) {
 			w.set(res, key, mt, duration)
@@ -211,18 +218,6 @@ func (w *ResponseWriter) WriteMsg(res *dns.Msg) error {
 
 	if w.prefetch {
 		return nil
-	}
-
-	// Apply capped TTL to this reply to avoid jarring TTL experience 1799 -> 8 (e.g.)
-	ttl := uint32(duration.Seconds())
-	res.Answer = filterRRSlice(res.Answer, ttl, false)
-	res.Ns = filterRRSlice(res.Ns, ttl, false)
-	res.Extra = filterRRSlice(res.Extra, ttl, false)
-
-	if !w.do && !w.ad {
-		// unset AD bit if requester is not OK with DNSSEC
-		// But retain AD bit if requester set the AD bit in the request, per RFC6840 5.7-5.8
-		res.AuthenticatedData = false
 	}
 
 	return w.ResponseWriter.WriteMsg(res)
@@ -307,9 +302,9 @@ func (w *verifyStaleResponseWriter) WriteMsg(res *dns.Msg) error {
 }
 
 const (
-	maxTTL  = dnsutil.MaximumDefaulTTL
+	maxTTL  = dnsutil.MaximumDefaultTTL
 	minTTL  = dnsutil.MinimalDefaultTTL
-	maxNTTL = dnsutil.MaximumDefaulTTL / 2
+	maxNTTL = dnsutil.MaximumDefaultTTL / 2
 	minNTTL = dnsutil.MinimalDefaultTTL
 
 	defaultCap = 10000 // default capacity of the cache.
